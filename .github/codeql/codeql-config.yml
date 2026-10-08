@@ -1,0 +1,21 @@
+name: travnie CodeQL default setup
+
+# Keep Default Setup as the workflow owner. This file only extends analysis scope.
+queries:
+  - uses: security-extended
+
+# Broaden taint sources for languages that support local threat modeling.
+threat-models: local
+
+# Exclude dependency trees and generated build artifacts, not first-party source.
+paths-ignore:
+  - "**/node_modules/**"
+  - "**/.venv/**"
+  - "**/venv/**"
+  - "**/vendor/**"
+  - "**/dist/**"
+  - "**/build/**"
+  - "**/coverage/**"
+  - "**/.next/**"
+  - "**/.nuxt/**"
+  - "**/target/**"
