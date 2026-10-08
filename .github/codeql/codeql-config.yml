@@ -5,7 +5,8 @@ queries:
   - uses: security-extended
 
 # Broaden taint sources for languages that support local threat modeling.
-threat-models: local
+threat-models:
+  - local
 
 # Exclude dependency trees and generated build artifacts, not first-party source.
 paths-ignore:
