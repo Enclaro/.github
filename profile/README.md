@@ -7,7 +7,7 @@
 
 **Open source under one roof: apps, feeds, media, automation, and small machines that somehow became infrastructure.**
 
-[![organization](https://img.shields.io/badge/travnie-181717?style=for-the-badge&logo=github)](https://github.com/travnie) [![Docs7](../assets/badges/docs7.svg)](https://travnie.docs7.io/)  
+[![organization](https://img.shields.io/badge/travnie-181717?style=for-the-badge&logo=github)](https://github.com/travnie) [![Docs7](https://raw.githubusercontent.com/travnie/.github/main/assets/badges/docs7.svg)](https://travnie.docs7.io/)  
 [![Cloudflare](https://workers.cloudflare.com/built-with-cloudflare.svg)](https://trfny.com)
 
 <sub></sub>
@@ -41,10 +41,10 @@
 ### Ja i moje ziomki
 
 <p align="left">
-  <img src="../assets/ziomki2.png" width="420">
+  <img src="https://raw.githubusercontent.com/travnie/.github/main/assets/ziomki2.png" width="420">
 </p>
 <p align="center">
-  <img src="https://github.com/trvny/trvny/blob/main/assets/132311.gif" width="100%">
+  <img src="https://raw.githubusercontent.com/trvny/trvny/main/assets/132311.gif" width="100%">
 </p>
 <a href="https://git.io/typing-svg"><img src="https://readme-typing-svg.demolab.com?font=VT323&weight=600&letterSpacing=-95%25&duration=1234&pause=100&color=D718CE&center=true&random=true&width=500&height=150&lines=Co%C5%9B+si%C4%99+popsu%C5%82o+i+nie+by%C5%82o+mnie+s%C5%82ycha%C4%87;KURDE;2137;twojstarytotwojstary" alt="Typing-SVG" /></a>
 
