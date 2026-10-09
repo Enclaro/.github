@@ -42,9 +42,7 @@
 
 ### 我和我的伙计们
 
-<p align="left">
-  <img src="https://raw.githubusercontent.com/travnie/.github/main/assets/ziomki2.png" width="420" alt="我和我的伙计们">
-</p>
+<p align="center"><a href="https://github.com/trvny/.github/blob/main/assets/profile/contributors.svg"><img src="https://raw.githubusercontent.com/trvny/.github/main/assets/profile/contributors.svg" alt="Contributors across trvny and travnie" width="320"></a></p>
 <p align="center">
   <img src="https://raw.githubusercontent.com/trvny/trvny/main/assets/132311.gif" width="69%">
 </p>
