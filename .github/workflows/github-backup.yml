@@ -5,6 +5,9 @@ on: # yamllint disable-line rule:truthy
   schedule:
     - cron: "37 3 * * 0"
   workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/github-backup.yml"
 
 concurrency:
   group: github-gcs-backup
@@ -27,15 +30,11 @@ env:
 
 jobs:
   backup:
+    if: github.event_name != 'pull_request'
     name: Back up GitHub repositories
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - name: Checkout control repository
-        uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-
       - name: Check GPTomek authentication
         id: auth
         shell: bash
@@ -90,6 +89,932 @@ jobs:
             echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           fi
 
+      - &backup-prepare
+        name: Prepare embedded backup helpers
+        shell: bash
+        run: |
+          set -euo pipefail
+          helper_dir="$RUNNER_TEMP/github-backup-helpers"
+          mkdir -p "$helper_dir"
+          cat > "$helper_dir/github-backup-build.sh" <<'__GITHUB_BACKUP_HELPER_0__'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          
+          mkdir -p backup/github work
+          repos_file="$(mktemp)"
+          
+          if [[ -n "$TRVNY_TOKEN" && -n "$ORG_TOKEN" ]]; then
+            auth_mode="gptomek-app"
+            GH_TOKEN="$TRVNY_TOKEN" gh api --paginate installation/repositories \
+              --jq '.repositories[].full_name' >> "$repos_file"
+            GH_TOKEN="$ORG_TOKEN" gh api --paginate installation/repositories \
+              --jq '.repositories[].full_name' >> "$repos_file"
+          else
+            auth_mode="public-fallback"
+            GH_TOKEN="$PUBLIC_TOKEN" gh api --paginate \
+              'users/trvny/repos?type=owner&per_page=100' \
+              --jq '.[] | select(.visibility == "public") | .full_name' >> "$repos_file"
+            GH_TOKEN="$PUBLIC_TOKEN" gh api --paginate \
+              'orgs/travnie/repos?type=public&per_page=100' \
+              --jq '.[].full_name' >> "$repos_file"
+          fi
+          sort -u -o "$repos_file" "$repos_file"
+          if [[ ! -s "$repos_file" ]]; then
+            echo "::error::Repository discovery returned no repositories."
+            exit 1
+          fi
+          
+          while IFS= read -r repo; do
+            [[ -n "$repo" ]] || continue
+            owner="${repo%%/*}"
+            name="${repo#*/}"
+          
+            case "$owner" in
+              trvny) token="$TRVNY_TOKEN" ;;
+              travnie) token="$ORG_TOKEN" ;;
+              *) continue ;;
+            esac
+          
+            mirror="work/$owner/$name.git"
+            archive="backup/github/$owner/$name.git.tar.gz"
+            metadata_dir="work/github-metadata/$owner/$name"
+            metadata_archive="backup/github/metadata/$owner/$name.github-metadata.tar.gz"
+            mkdir -p \
+              "work/$owner" \
+              "backup/github/$owner" \
+              "work/github-metadata/$owner" \
+              "backup/github/metadata/$owner"
+          
+            if [[ -n "$token" ]]; then
+              auth="$(printf 'x-access-token:%s' "$token" | base64 -w0)"
+              git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" \
+                clone --mirror "https://github.com/$repo.git" "$mirror"
+              git -C "$mirror" \
+                -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" \
+                lfs fetch --all
+            else
+              git clone --mirror "https://github.com/$repo.git" "$mirror"
+              git -C "$mirror" lfs fetch --all
+            fi
+          
+            git -C "$mirror" fsck --full
+          
+            api_token="$token"
+            if [[ -z "$api_token" ]]; then
+              api_token="$PUBLIC_TOKEN"
+            fi
+            backup_filter_paths=""
+            if [[ "$repo" == "$FILTERED_REPOSITORY" ]]; then
+              backup_filter_paths="$FILTERED_PATHS"
+            fi
+            GH_TOKEN="$api_token" GIT_AUTH_TOKEN="$token" \
+              BACKUP_GIT_FILTER_PATHS="$backup_filter_paths" node \
+              "$RUNNER_TEMP/github-backup-helpers/github-backup-metadata.cjs" \
+              "$repo" "$mirror" "$metadata_dir"
+          
+            if [[ "$repo" == "$FILTERED_REPOSITORY" ]]; then
+              git -C "$mirror" for-each-ref --format='%(refname) %(objectname)' \
+                | sort > "$metadata_dir/git-source-refs.txt"
+              filter_args=()
+              for filter_path in $FILTERED_PATHS; do
+                filter_args+=(--path "$filter_path")
+              done
+              git -C "$mirror" filter-repo "${filter_args[@]}" --invert-paths --force
+          
+              lfs_oids="$(mktemp)"
+              git -C "$mirror" lfs ls-files --all --long \
+                | awk '{print $1}' | sort -u > "$lfs_oids"
+              lfs_objects="$mirror/lfs/objects"
+              if [[ -d "$lfs_objects" ]]; then
+                while IFS= read -r -d '' lfs_object; do
+                  oid="$(basename "$lfs_object")"
+                  if ! grep -Fxq "$oid" "$lfs_oids"; then
+                    rm -f "$lfs_object"
+                  fi
+                done < <(find "$lfs_objects" -type f -print0)
+              fi
+              while IFS= read -r oid; do
+                [[ -n "$oid" ]] || continue
+                object="$lfs_objects/${oid:0:2}/${oid:2:2}/$oid"
+                if [[ ! -f "$object" ]]; then
+                  echo "::error::Missing retained LFS object $oid for $repo."
+                  exit 1
+                fi
+              done < "$lfs_oids"
+          
+              test -s "$mirror/filter-repo/commit-map"
+              cp "$mirror/filter-repo/commit-map" \
+                "$metadata_dir/git-rewrite-commit-map.txt"
+              git -C "$mirror" for-each-ref --format='%(refname) %(objectname)' \
+                | sort > "$metadata_dir/git-backup-refs.txt"
+          
+              source_ref_names="$(mktemp)"
+              backup_ref_names="$(mktemp)"
+              awk '{print $1}' "$metadata_dir/git-source-refs.txt" > "$source_ref_names"
+              awk '{print $1}' "$metadata_dir/git-backup-refs.txt" > "$backup_ref_names"
+              diff -u "$source_ref_names" "$backup_ref_names"
+          
+              {
+                printf 'strategy=full-history-filtered-paths\n'
+                printf 'repository=%s\n' "$repo"
+                printf 'git_contributors_scope=unfiltered-source-history\n'
+                printf 'commit_map=git-rewrite-commit-map.txt\n'
+                printf 'excluded_paths:\n'
+                for filter_path in $FILTERED_PATHS; do
+                  printf '  - %s\n' "$filter_path"
+                done
+              } > "$metadata_dir/GIT_FILTER.txt"
+          
+              restore_test="$GITHUB_WORKSPACE/work/restore-test/$owner/$name.git"
+              mkdir -p "$(dirname "$restore_test")"
+              git init --bare "$restore_test"
+              git -C "$mirror" push --mirror "$restore_test"
+              git -C "$restore_test" fsck --full
+              diff -u \
+                <(git -C "$mirror" for-each-ref --format='%(refname) %(objectname)' | sort) \
+                <(git -C "$restore_test" for-each-ref --format='%(refname) %(objectname)' | sort)
+              rm -rf "$restore_test"
+            fi
+          
+            git -C "$mirror" fsck --full
+            tar -C "work/$owner" -czf "$archive" "$name.git"
+            tar -C "work/github-metadata/$owner" \
+              -czf "$metadata_archive" "$name"
+          done < "$repos_file"
+          
+          (
+            cd backup/github
+            find . -type f -name '*.tar.gz' -print0 \
+              | sort -z \
+              | xargs -0 sha256sum
+          ) > backup/github/SHA256SUMS
+          
+          archives_file="$(mktemp)"
+          find backup/github -type f -name '*.tar.gz' -printf '%P\n' \
+            | sort -u > "$archives_file"
+          
+          {
+            printf 'generated_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            printf 'repository_count=%s\n' "$(wc -l < "$repos_file" | tr -d ' ')"
+            printf 'archive_count=%s\n' "$(wc -l < "$archives_file" | tr -d ' ')"
+            printf 'auth_mode=%s\n' "$auth_mode"
+            printf 'metadata_export_schema_current=3\n'
+            printf 'metadata_export_schema_source=per-archive:EXPORT.json\n'
+            if [[ -n "$FILTERED_REPOSITORY" ]]; then
+              printf 'filtered_git=%s:paths-%s\n' "$FILTERED_REPOSITORY" "${FILTERED_PATHS// /,}"
+            fi
+            printf 'repositories:\n'
+            sed 's/^/  - /' "$repos_file"
+            printf 'archives:\n'
+            sed 's/^/  - /' "$archives_file"
+          } > backup/github/MANIFEST.txt
+          __GITHUB_BACKUP_HELPER_0__
+          cat > "$helper_dir/github-backup-metadata.cjs" <<'__GITHUB_BACKUP_HELPER_1__'
+          'use strict';
+          
+          const fs = require('node:fs');
+          const path = require('node:path');
+          const { execFileSync, spawnSync } = require('node:child_process');
+          
+          const API = 'https://api.github.com';
+          const API_VERSION = '2022-11-28';
+          const USER_AGENT = 'travnie-github-backup';
+          const MAX_ATTEMPTS = 5;
+          const RETRY_BUDGET_MS = 20 * 60_000;
+          
+          function usage() {
+            throw new Error('usage: node github-backup-metadata.cjs OWNER/REPO MIRROR OUTPUT_DIR');
+          }
+          
+          const [repository, mirrorPath, outputDir] = process.argv.slice(2);
+          if (!repository || !mirrorPath || !outputDir || !repository.includes('/')) usage();
+          const [owner, repo] = repository.split('/', 2);
+          const token = process.env.GH_TOKEN;
+          if (!token) throw new Error('GH_TOKEN is required');
+          const backupGitFilterPaths = (process.env.BACKUP_GIT_FILTER_PATHS || '')
+            .split(/\s+/)
+            .filter(Boolean);
+          
+          function headers(extra = {}) {
+            return {
+              Accept: 'application/vnd.github+json',
+              Authorization: `Bearer ${token}`,
+              'User-Agent': USER_AGENT,
+              'X-GitHub-Api-Version': API_VERSION,
+              ...extra,
+            };
+          }
+          
+          function sleep(ms) {
+            return new Promise((resolve) => setTimeout(resolve, ms));
+          }
+          
+          function retryDelayMs(response, attempt) {
+            const retryAfter = response?.headers.get('retry-after');
+            if (retryAfter) {
+              const seconds = Number(retryAfter);
+              if (Number.isFinite(seconds)) return Math.max(seconds * 1000, 1000);
+              const timestamp = Date.parse(retryAfter);
+              if (Number.isFinite(timestamp)) return Math.max(timestamp - Date.now(), 1000);
+            }
+          
+            const remaining = response?.headers.get('x-ratelimit-remaining');
+            const reset = Number(response?.headers.get('x-ratelimit-reset'));
+            if (remaining === '0' && Number.isFinite(reset)) {
+              return Math.max(reset * 1000 - Date.now() + 1000, 1000);
+            }
+          
+            return Math.min(1000 * 2 ** attempt, 16_000);
+          }
+          
+          function secondaryRateLimitDelayMs(response, attempt) {
+            if (response?.headers.get('retry-after')) return retryDelayMs(response, attempt);
+            return Math.min(60_000 * 2 ** attempt, 5 * 60_000);
+          }
+          
+          async function retryPause(delay, deadline, reason) {
+            const boundedDelay = Math.max(Math.ceil(delay), 1000);
+            if (Date.now() + boundedDelay > deadline) {
+              throw new Error(
+                `${reason}; retry delay ${boundedDelay}ms exceeds the remaining request retry budget`,
+              );
+            }
+            console.error(`${reason}; retrying in ${boundedDelay}ms`);
+            await sleep(boundedDelay);
+          }
+          
+          async function requestJson(
+            url,
+            options = {},
+            { deadline = Date.now() + RETRY_BUDGET_MS, retryAccepted = false } = {},
+          ) {
+            for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt += 1) {
+              const remainingMs = deadline - Date.now();
+              if (remainingMs <= 0) throw new Error(`GitHub request deadline exceeded for ${url}`);
+          
+              const controller = new AbortController();
+              const timeout = setTimeout(() => controller.abort(), remainingMs);
+              let response;
+              let body;
+              try {
+                response = await fetch(url, {
+                  ...options,
+                  headers: headers(options.headers),
+                  signal: controller.signal,
+                });
+                body = await response.text();
+              } catch (error) {
+                if (Date.now() >= deadline) {
+                  throw new Error(`GitHub request deadline exceeded for ${url}: ${error.message}`);
+                }
+                if (attempt + 1 >= MAX_ATTEMPTS) {
+                  throw new Error(`GitHub request/response failed for ${url}: ${error.message}`);
+                }
+                await retryPause(
+                  retryDelayMs(response ?? null, attempt),
+                  deadline,
+                  `GitHub request/response failure for ${url}`,
+                );
+                continue;
+              } finally {
+                clearTimeout(timeout);
+              }
+              if (response.status === 202 && retryAccepted) {
+                if (attempt + 1 >= MAX_ATTEMPTS) {
+                  throw new Error(`GitHub request remained HTTP 202 for ${url}`);
+                }
+                const retryAfter = response.headers.get('retry-after');
+                const delay = retryAfter
+                  ? retryDelayMs(response, attempt)
+                  : Math.min(5000 * 2 ** attempt, 60_000);
+                await retryPause(delay, deadline, `GitHub request still computing for ${url}`);
+                continue;
+              }
+          
+              if (response.ok) {
+                try {
+                  return {
+                    data: body ? JSON.parse(body) : null,
+                    headers: response.headers,
+                    status: response.status,
+                  };
+                } catch (error) {
+                  if (attempt + 1 >= MAX_ATTEMPTS) {
+                    throw new Error(`Invalid JSON from ${url}: ${error.message}`);
+                  }
+                  await retryPause(
+                    retryDelayMs(response, attempt),
+                    deadline,
+                    `Invalid GitHub JSON from ${url}`,
+                  );
+                  continue;
+                }
+              }
+          
+              const primaryRateLimited =
+                (response.status === 403 || response.status === 429) &&
+                response.headers.get('x-ratelimit-remaining') === '0';
+              const secondaryRateLimited =
+                !primaryRateLimited &&
+                (response.status === 429 ||
+                  (response.status === 403 &&
+                    (response.headers.get('retry-after') || /(?:secondary )?rate limit/i.test(body))));
+              const retryable = primaryRateLimited || secondaryRateLimited || response.status >= 500;
+              if (!retryable || attempt + 1 >= MAX_ATTEMPTS) {
+                throw new Error(`${response.status} ${response.statusText} for ${url}: ${body.slice(0, 1000)}`);
+              }
+          
+              await retryPause(
+                secondaryRateLimited
+                  ? secondaryRateLimitDelayMs(response, attempt)
+                  : retryDelayMs(response, attempt),
+                deadline,
+                `GitHub request ${response.status} for ${url}`,
+              );
+            }
+          
+            throw new Error(`GitHub request retries exhausted for ${url}`);
+          }
+          
+          function retryableGraphqlErrors(errors) {
+            return (
+              Array.isArray(errors) &&
+              errors.length > 0 &&
+              errors.every((error) => {
+                const signal = [
+                  error?.type,
+                  error?.extensions?.code,
+                  error?.message,
+                ]
+                  .filter(Boolean)
+                  .join(' ');
+                return /rate.?limit|throttl|abuse|secondary/i.test(signal);
+              })
+            );
+          }
+          
+          function graphqlRetryDelayMs(payload, responseHeaders, attempt) {
+            const remaining = Number(payload?.data?.rateLimit?.remaining);
+            const headerRemaining = responseHeaders?.get('x-ratelimit-remaining');
+            const primaryExhausted = remaining === 0 || headerRemaining === '0';
+          
+            if (primaryExhausted) {
+              const resetAt = Date.parse(payload?.data?.rateLimit?.resetAt ?? '');
+              if (Number.isFinite(resetAt)) return Math.max(resetAt - Date.now() + 1000, 1000);
+              return retryDelayMs({ headers: responseHeaders }, attempt);
+            }
+          
+            if (responseHeaders?.get('retry-after')) {
+              return retryDelayMs({ headers: responseHeaders }, attempt);
+            }
+          
+            return secondaryRateLimitDelayMs({ headers: responseHeaders }, attempt);
+          }
+          
+          async function requestGraphql(query, variables) {
+            const deadline = Date.now() + RETRY_BUDGET_MS;
+            for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt += 1) {
+              const { data: payload, headers: responseHeaders } = await requestJson(
+                `${API}/graphql`,
+                {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ query, variables }),
+                },
+                { deadline },
+              );
+          
+              if (!payload?.errors?.length) return payload;
+              if (!retryableGraphqlErrors(payload.errors) || attempt + 1 >= MAX_ATTEMPTS) {
+                throw new Error(`GraphQL request failed: ${JSON.stringify(payload.errors)}`);
+              }
+          
+              await retryPause(
+                graphqlRetryDelayMs(payload, responseHeaders, attempt),
+                deadline,
+                `GitHub GraphQL throttled for ${repository}`,
+              );
+            }
+          
+            throw new Error(`GraphQL retries exhausted for ${repository}`);
+          }
+          
+          async function paginateRest(
+            endpoint,
+            params = {},
+            { allowNoContent = false, retryAccepted = false } = {},
+          ) {
+            const items = [];
+            for (let page = 1; ; page += 1) {
+              const url = new URL(`${API}${endpoint}`);
+              for (const [key, value] of Object.entries({ ...params, per_page: 100, page })) {
+                url.searchParams.set(key, String(value));
+              }
+              const { data, status } = await requestJson(url, {}, { retryAccepted });
+              if (status === 204 && allowNoContent) break;
+              if (!Array.isArray(data)) throw new Error(`Expected array from ${endpoint}, got HTTP ${status}`);
+              items.push(...data);
+              if (data.length < 100) break;
+            }
+            return items;
+          }
+          
+          function writeJson(file, data) {
+            fs.writeFileSync(file, `${JSON.stringify(data, null, 2)}\n`);
+          }
+          
+          function writeJsonl(file, items) {
+            const descriptor = fs.openSync(file, 'w');
+            try {
+              for (const item of items) fs.writeSync(descriptor, `${JSON.stringify(item)}\n`);
+            } finally {
+              fs.closeSync(descriptor);
+            }
+          }
+          
+          function normalizeGraphqlReview(pullNumber, review) {
+            return {
+              pull_number: pullNumber,
+              id: review.databaseId ?? null,
+              node_id: review.id ?? null,
+              author_login: review.author?.login ?? null,
+              author_id: null,
+              author_association: review.authorAssociation ?? null,
+              state: review.state ?? null,
+              body: review.body ?? null,
+              submitted_at: review.submittedAt ?? null,
+              created_at: review.createdAt ?? null,
+              updated_at: review.updatedAt ?? null,
+              url: review.url ?? null,
+              commit_id: review.commit?.oid ?? null,
+              source_api: 'graphql',
+            };
+          }
+          
+          function normalizeRestReview(pullNumber, review) {
+            return {
+              pull_number: pullNumber,
+              id: review.id ?? null,
+              node_id: review.node_id ?? null,
+              author_login: review.user?.login ?? null,
+              author_id: review.user?.id ?? null,
+              author_association: review.author_association ?? null,
+              state: review.state ?? null,
+              body: review.body ?? null,
+              submitted_at: review.submitted_at ?? null,
+              created_at: review.created_at ?? null,
+              updated_at: review.updated_at ?? null,
+              url: review.html_url ?? null,
+              commit_id: review.commit_id ?? null,
+              source_api: 'rest',
+            };
+          }
+          
+          async function fetchPullReviews() {
+            const query = `
+              query($owner:String!, $repo:String!, $cursor:String) {
+                repository(owner:$owner, name:$repo) {
+                  pullRequests(first:50, after:$cursor, orderBy:{field:CREATED_AT, direction:ASC}) {
+                    pageInfo { hasNextPage endCursor }
+                    nodes {
+                      number
+                      reviews(first:100) {
+                        totalCount
+                        pageInfo { hasNextPage }
+                        nodes {
+                          id
+                          databaseId
+                          author { login }
+                          authorAssociation
+                          state
+                          body
+                          submittedAt
+                          createdAt
+                          updatedAt
+                          url
+                          commit { oid }
+                        }
+                      }
+                    }
+                  }
+                }
+                rateLimit { remaining resetAt }
+              }`;
+          
+            const reviews = [];
+            let cursor = null;
+            do {
+              const payload = await requestGraphql(query, { owner, repo, cursor });
+              const pulls = payload.data?.repository?.pullRequests;
+              if (!pulls) throw new Error(`GraphQL repository not found: ${repository}`);
+          
+              for (const pull of pulls.nodes) {
+                if (pull.reviews.pageInfo.hasNextPage) {
+                  const overflow = await paginateRest(`/repos/${owner}/${repo}/pulls/${pull.number}/reviews`);
+                  reviews.push(...overflow.map((review) => normalizeRestReview(pull.number, review)));
+                } else {
+                  reviews.push(...pull.reviews.nodes.map((review) => normalizeGraphqlReview(pull.number, review)));
+                }
+              }
+              cursor = pulls.pageInfo.hasNextPage ? pulls.pageInfo.endCursor : null;
+            } while (cursor);
+          
+            return reviews;
+          }
+          
+          function wikiGitEnvironment() {
+            const gitToken = process.env.GIT_AUTH_TOKEN;
+            const env = {
+              ...process.env,
+              GIT_TERMINAL_PROMPT: '0',
+              GCM_INTERACTIVE: 'Never',
+            };
+            if (process.platform !== 'win32') env.GIT_ASKPASS = '/bin/false';
+            if (!gitToken) return env;
+          
+            const basic = Buffer.from(`x-access-token:${gitToken}`).toString('base64');
+            return {
+              ...env,
+              GIT_CONFIG_COUNT: '1',
+              GIT_CONFIG_KEY_0: 'http.https://github.com/.extraheader',
+              GIT_CONFIG_VALUE_0: `AUTHORIZATION: basic ${basic}`,
+            };
+          }
+          
+          function backupWiki(repositoryData) {
+            if (!repositoryData?.has_wiki) {
+              return { enabled: false, backed_up: false, reason: 'disabled', refs: 0 };
+            }
+          
+            const url = `https://github.com/${repository}.wiki.git`;
+            const env = wikiGitEnvironment();
+            const probe = spawnSync('git', ['ls-remote', url], {
+              encoding: 'utf8',
+              env,
+              maxBuffer: 8 * 1024 * 1024,
+            });
+            if (probe.status !== 0) {
+              const detail = `${probe.stdout ?? ''}\n${probe.stderr ?? ''}`.trim();
+              const gitToken = process.env.GIT_AUTH_TOKEN;
+              const notFound = /repository not found|not found/i.test(detail);
+              const credentialPrompt = /could not read (?:username|password)|terminal prompts disabled|askpass|authentication failed/i.test(detail);
+          
+              if (repositoryData.private && !gitToken && (notFound || credentialPrompt)) {
+                return { enabled: true, backed_up: false, reason: 'auth-unavailable', refs: 0 };
+              }
+              if (!repositoryData.private && !gitToken && (notFound || credentialPrompt)) {
+                return { enabled: true, backed_up: false, reason: 'uninitialized', refs: 0 };
+              }
+              if (notFound) {
+                return { enabled: true, backed_up: false, reason: 'uninitialized', refs: 0 };
+              }
+              throw new Error(`Wiki probe failed for ${repository}: ${detail.slice(0, 1000)}`);
+            }
+          
+            const wikiPath = path.join(outputDir, 'wiki.git');
+            if (fs.existsSync(wikiPath)) {
+              throw new Error(`Refusing to overwrite existing wiki mirror: ${wikiPath}`);
+            }
+            execFileSync('git', ['clone', '--mirror', url, wikiPath], { env, stdio: 'inherit' });
+            execFileSync('git', ['-C', wikiPath, 'fsck', '--full'], { stdio: 'inherit' });
+            const refs = execFileSync(
+              'git',
+              ['-C', wikiPath, 'for-each-ref', '--format=%(refname)'],
+              { encoding: 'utf8' },
+            )
+              .split(/\r?\n/)
+              .filter(Boolean).length;
+            return { enabled: true, backed_up: true, reason: null, refs };
+          }
+          
+          function gitContributors() {
+            const output = execFileSync(
+              'git',
+              ['-C', mirrorPath, 'log', '--all', '--format=%aN%x00%aE%x00'],
+              { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 },
+            );
+            const fields = output.split('\0');
+            const counts = new Map();
+            for (let index = 0; index + 1 < fields.length; index += 2) {
+              const name = fields[index].replace(/^\r?\n/, '');
+              const email = fields[index + 1];
+              if (!name && !email) continue;
+              const key = JSON.stringify([name, email]);
+              counts.set(key, (counts.get(key) ?? 0) + 1);
+            }
+            return [...counts.entries()]
+              .map(([identity, commits]) => {
+                const [name, email] = JSON.parse(identity);
+                return { name, email, commits };
+              })
+              .sort((a, b) =>
+                b.commits - a.commits ||
+                a.name.localeCompare(b.name) ||
+                a.email.localeCompare(b.email),
+              );
+          }
+          
+          async function main() {
+            fs.mkdirSync(outputDir, { recursive: true });
+            const { data: repositoryData } = await requestJson(`${API}/repos/${owner}/${repo}`);
+            const pulls = await paginateRest(`/repos/${owner}/${repo}/pulls`, {
+              state: 'all',
+              sort: 'created',
+              direction: 'asc',
+            });
+            const issuesRaw = await paginateRest(`/repos/${owner}/${repo}/issues`, {
+              state: 'all',
+              sort: 'created',
+              direction: 'asc',
+            });
+            const issues = issuesRaw.filter((issue) => !issue.pull_request);
+            const conversationComments = await paginateRest(`/repos/${owner}/${repo}/issues/comments`, {
+              sort: 'created',
+              direction: 'asc',
+            });
+            const reviewComments = await paginateRest(`/repos/${owner}/${repo}/pulls/comments`, {
+              sort: 'created',
+              direction: 'asc',
+            });
+            const issueEvents = await paginateRest(`/repos/${owner}/${repo}/issues/events`);
+            const contributors = await paginateRest(
+              `/repos/${owner}/${repo}/contributors`,
+              { anon: '1' },
+              { allowNoContent: true, retryAccepted: true },
+            );
+            const pullReviews = await fetchPullReviews();
+            const gitAuthors = gitContributors();
+            const wiki = backupWiki(repositoryData);
+          
+            writeJson(path.join(outputDir, 'repository.json'), repositoryData);
+            writeJsonl(path.join(outputDir, 'pulls.jsonl'), pulls);
+            writeJsonl(path.join(outputDir, 'pull-reviews.jsonl'), pullReviews);
+            writeJsonl(path.join(outputDir, 'conversation-comments.jsonl'), conversationComments);
+            writeJsonl(path.join(outputDir, 'review-comments.jsonl'), reviewComments);
+            writeJsonl(path.join(outputDir, 'issues.jsonl'), issues);
+            writeJsonl(path.join(outputDir, 'issue-events.jsonl'), issueEvents);
+            writeJson(path.join(outputDir, 'contributors.json'), contributors);
+            writeJson(path.join(outputDir, 'git-contributors.json'), gitAuthors);
+          
+            const counts = {
+              pulls: pulls.length,
+              pull_reviews: pullReviews.length,
+              conversation_comments: conversationComments.length,
+              review_comments: reviewComments.length,
+              issues: issues.length,
+              issue_events: issueEvents.length,
+              github_contributors: contributors.length,
+              git_contributors: gitAuthors.length,
+              wiki_backed_up: wiki.backed_up ? 1 : 0,
+              wiki_refs: wiki.refs,
+            };
+            writeJson(path.join(outputDir, 'EXPORT.json'), {
+              schema_version: 3,
+              generated_at: new Date().toISOString(),
+              repository,
+              counts,
+              wiki,
+              git_backup: {
+                strategy: backupGitFilterPaths.length ? 'full-history-filtered-paths' : 'full-mirror',
+                excluded_paths: backupGitFilterPaths,
+                commit_map: backupGitFilterPaths.length ? 'git-rewrite-commit-map.txt' : null,
+                git_contributors_scope: 'unfiltered-source-history',
+              },
+              notes: [
+                'JSON and JSONL files preserve GitHub API identifiers, authors, timestamps, states, and URLs.',
+                'Binary attachments, Actions artifacts, releases, packages, and repository settings are not included.',
+                'git-contributors.json is derived from the unfiltered source mirror before backup-only history filtering.',
+                'When GitHub Wiki exists, wiki.git is a verified full Git mirror stored inside this metadata archive.',
+              ],
+            });
+            process.stdout.write(`${repository}: ${JSON.stringify(counts)}\n`);
+          }
+          
+          main().catch((error) => {
+            console.error(error.stack || error.message);
+            process.exitCode = 1;
+          });
+          __GITHUB_BACKUP_HELPER_1__
+          cat > "$helper_dir/github-backup-verify-bucket.sh" <<'__GITHUB_BACKUP_HELPER_2__'
+          #!/usr/bin/env bash
+          bucket_json="$RUNNER_TEMP/github-backup-bucket.json"
+          gcloud storage buckets describe "gs://${GCS_BUCKET}" --format=json > "$bucket_json"
+          python - "$bucket_json" <<'PY'
+          import json
+          import sys
+          
+          with open(sys.argv[1], encoding="utf-8") as handle:
+              bucket = json.load(handle)
+          
+          # gcloud omits requester_pays when it is disabled.
+          bucket.setdefault("requester_pays", False)
+          
+          expected = {
+              "location": "US-CENTRAL1",
+              "default_storage_class": "STANDARD",
+              "public_access_prevention": "enforced",
+              "requester_pays": False,
+              "uniform_bucket_level_access": True,
+          }
+          failures = [
+              f"{key}={bucket.get(key)!r}, expected {value!r}"
+              for key, value in expected.items()
+              if bucket.get(key) != value
+          ]
+          soft_delete = bucket.get("soft_delete_policy", {})
+          retention = soft_delete.get("retentionDurationSeconds")
+          if retention is None:
+              duration = str(soft_delete.get("retentionDuration", ""))
+              retention = duration.removesuffix("s") if duration else None
+          retention = str(retention)
+          if retention != "604800":
+              failures.append(f"soft-delete retention={retention!r}, expected '604800'")
+          versioning_enabled = bucket.get("versioning_enabled")
+          if versioning_enabled is None:
+              versioning_enabled = bucket.get("versioning", {}).get("enabled", False)
+          if versioning_enabled:
+              failures.append("object versioning must be disabled")
+          if failures:
+              raise SystemExit("Bucket policy drift: " + "; ".join(failures))
+          PY
+          __GITHUB_BACKUP_HELPER_2__
+          cat > "$helper_dir/github-backup-retained.sh" <<'__GITHUB_BACKUP_HELPER_3__'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          
+          scratch="$RUNNER_TEMP/github-backup-retained"
+          mkdir -p "$scratch"
+          current_archives="$scratch/current-archives.txt"
+          remote_archives="$scratch/remote-archives.txt"
+          retained_archives="$scratch/retained-archives.txt"
+          previous_checksums="$scratch/previous-SHA256SUMS"
+          retained_checksums="$scratch/retained-SHA256SUMS"
+          
+          find backup/github -type f -name '*.tar.gz' -printf '%P\n' \
+            | sort -u > "$current_archives"
+          
+          set +e
+          remote_output="$(gcloud storage ls "gs://${GCS_BUCKET}/github/**/*.tar.gz" 2>&1)"
+          remote_status=$?
+          set -e
+          if (( remote_status == 0 )); then
+            printf '%s\n' "$remote_output" \
+              | sed "s#^gs://${GCS_BUCKET}/github/##" \
+              | sed '/^$/d' \
+              | sort -u > "$remote_archives"
+          elif grep -q 'matched no objects' <<<"$remote_output"; then
+            : > "$remote_archives"
+          else
+            printf '%s\n' "$remote_output" >&2
+            exit "$remote_status"
+          fi
+          
+          comm -23 "$remote_archives" "$current_archives" > "$retained_archives"
+          : > "$retained_checksums"
+          
+          if [[ -s "$retained_archives" ]]; then
+            if ! gcloud storage cp \
+              "gs://${GCS_BUCKET}/github/SHA256SUMS" "$previous_checksums" >/dev/null 2>&1; then
+              echo "::error::Retained archives exist but the previous SHA256SUMS is unavailable."
+              exit 1
+            fi
+          
+            while IFS= read -r archive; do
+              checksum_line="$(awk -v target="$archive" '
+                {
+                  path = $2
+                  sub(/\r$/, "", path)
+                  sub(/^\.\//, "", path)
+                  if (path == target) { sub(/\r$/, ""); print; exit }
+                }
+              ' "$previous_checksums")"
+              if [[ -z "$checksum_line" ]]; then
+                echo "::error::Missing retained checksum for $archive."
+                exit 1
+              fi
+              printf '%s\n' "$checksum_line" >> "$retained_checksums"
+            done < "$retained_archives"
+          fi
+          
+          cat "$retained_checksums" backup/github/SHA256SUMS \
+            | sort -k2,2 > "$scratch/SHA256SUMS"
+          cp "$scratch/SHA256SUMS" backup/github/SHA256SUMS
+          
+          repos="$scratch/repositories.txt"
+          awk '
+            /^repositories:$/ { section=1; next }
+            /^archives:$/ { section=0 }
+            section && /^  - / { sub(/^  - /, ""); print }
+          ' backup/github/MANIFEST.txt > "$repos"
+          sed -n 's/\.git\.tar\.gz$//p' "$retained_archives" >> "$repos"
+          sort -u -o "$repos" "$repos"
+          
+          archives="$scratch/archives.txt"
+          cat "$current_archives" "$retained_archives" | sort -u > "$archives"
+          generated_at="$(sed -n 's/^generated_at=//p' backup/github/MANIFEST.txt | head -n 1)"
+          
+          {
+            printf 'generated_at=%s\n' "$generated_at"
+            printf 'repository_count=%s\n' "$(wc -l < "$repos" | tr -d ' ')"
+            printf 'archive_count=%s\n' "$(wc -l < "$archives" | tr -d ' ')"
+            printf 'auth_mode=public-fallback\n'
+            printf 'metadata_export_schema_current=3\n'
+            printf 'metadata_export_schema_source=per-archive:EXPORT.json\n'
+            if [[ -n "$FILTERED_REPOSITORY" ]]; then
+              printf 'filtered_git=%s:paths-%s\n' "$FILTERED_REPOSITORY" "${FILTERED_PATHS// /,}"
+            fi
+            printf 'metadata_scope=live-archive-union\n'
+            printf 'repositories:\n'
+            sed 's/^/  - /' "$repos"
+            printf 'archives:\n'
+            sed 's/^/  - /' "$archives"
+          } > backup/github/MANIFEST.txt
+          __GITHUB_BACKUP_HELPER_3__
+          cat > "$helper_dir/github-backup-storage-guard.sh" <<'__GITHUB_BACKUP_HELPER_4__'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          
+          sum_bucket_bytes() {
+            local soft_deleted="${1:-false}"
+            local args=(--exhaustive)
+            local output status
+            if [[ "$soft_deleted" == "true" ]]; then
+              args+=(--soft-deleted)
+            fi
+          
+            set +e
+            output="$(gcloud storage ls -l "gs://${GCS_BUCKET}/github/**" "${args[@]}" 2>&1)"
+            status=$?
+            set -e
+          
+            if (( status != 0 )); then
+              if grep -q 'matched no objects' <<<"$output"; then
+                echo 0
+                return 0
+              fi
+              printf '%s\n' "$output" >&2
+              return "$status"
+            fi
+          
+            awk '$1 ~ /^[0-9]+$/ { total += $1 } END { printf "%.0f\n", total + 0 }' <<<"$output"
+          }
+          
+          new_bytes="$(du -sb backup/github | cut -f1)"
+          live_bytes="$(sum_bucket_bytes false)"
+          soft_deleted_bytes="$(sum_bucket_bytes true)"
+          projected_bytes=$((new_bytes + live_bytes + soft_deleted_bytes))
+          
+          echo "Live bytes: $live_bytes"
+          echo "Soft-deleted bytes: $soft_deleted_bytes"
+          echo "New backup bytes: $new_bytes"
+          echo "Worst-case projected billable bytes: $projected_bytes"
+          
+          if (( projected_bytes > MAX_BILLABLE_BYTES )); then
+            echo "::error::Projected billable storage exceeds the 4 GiB safety cap."
+            exit 1
+          fi
+          __GITHUB_BACKUP_HELPER_4__
+          cat > "$helper_dir/github-backup-verify-catalog.sh" <<'__GITHUB_BACKUP_HELPER_5__'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          
+          scratch="$RUNNER_TEMP/github-backup-catalog"
+          mkdir -p "$scratch"
+          remote="$scratch/remote.txt"
+          checksums="$scratch/checksums.txt"
+          manifest="$scratch/manifest.txt"
+          
+          gcloud storage ls "gs://${GCS_BUCKET}/github/**/*.tar.gz" \
+            | sed "s#^gs://${GCS_BUCKET}/github/##" \
+            | sort -u > "$remote"
+          awk '{ path = $2; sub(/\r$/, "", path); sub(/^\.\//, "", path); print path }' backup/github/SHA256SUMS \
+            | sort -u > "$checksums"
+          awk '
+            /^archives:$/ { section=1; next }
+            section && /^  - / { sub(/^  - /, ""); print; next }
+            section { exit }
+          ' backup/github/MANIFEST.txt | sort -u > "$manifest"
+          
+          if ! diff -u "$remote" "$checksums"; then
+            echo "::error::SHA256SUMS does not match the live archive set."
+            exit 1
+          fi
+          if ! diff -u "$remote" "$manifest"; then
+            echo "::error::MANIFEST.txt does not match the live archive set."
+            exit 1
+          fi
+          __GITHUB_BACKUP_HELPER_5__
+
+      - &backup-validate
+        name: Validate embedded backup helpers
+        shell: bash
+        run: |
+          helper_dir="$RUNNER_TEMP/github-backup-helpers"
+          for script in github-backup-build.sh github-backup-verify-bucket.sh github-backup-retained.sh github-backup-storage-guard.sh github-backup-verify-catalog.sh; do
+            bash -n "$helper_dir/$script"
+          done
+          node --check "$helper_dir/github-backup-metadata.cjs"
+
       - name: Build repository archives
         shell: bash
         env:
@@ -97,7 +1022,7 @@ jobs:
           ORG_TOKEN: ${{ steps.org-token.outputs.token }}
           PUBLIC_TOKEN: ${{ github.token }}
         run: |
-          bash --noprofile --norc -e -o pipefail .github/scripts/github-backup-build.sh
+          bash --noprofile --norc -e -o pipefail "$RUNNER_TEMP/github-backup-helpers/github-backup-build.sh"
       - name: Guard single backup size
         shell: bash
         run: |
@@ -119,16 +1044,16 @@ jobs:
       - name: Verify backup bucket policy
         shell: bash
         run: |
-          bash --noprofile --norc -e -o pipefail .github/scripts/github-backup-verify-bucket.sh
+          bash --noprofile --norc -e -o pipefail "$RUNNER_TEMP/github-backup-helpers/github-backup-verify-bucket.sh"
       - name: Merge retained fallback metadata
         if: steps.auth.outputs.configured != 'true'
         shell: bash
         run: |
-          bash --noprofile --norc -e -o pipefail .github/scripts/github-backup-retained.sh
+          bash --noprofile --norc -e -o pipefail "$RUNNER_TEMP/github-backup-helpers/github-backup-retained.sh"
       - name: Guard billed storage headroom
         shell: bash
         run: |
-          bash --noprofile --norc -e -o pipefail .github/scripts/github-backup-storage-guard.sh
+          bash --noprofile --norc -e -o pipefail "$RUNNER_TEMP/github-backup-helpers/github-backup-storage-guard.sh"
       - name: Sync backup to Cloud Storage
         shell: bash
         env:
@@ -147,7 +1072,7 @@ jobs:
       - name: Verify live backup catalog
         shell: bash
         run: |
-          bash --noprofile --norc -e -o pipefail .github/scripts/github-backup-verify-catalog.sh
+          bash --noprofile --norc -e -o pipefail "$RUNNER_TEMP/github-backup-helpers/github-backup-verify-catalog.sh"
       - name: Summarize backup
         shell: bash
         run: |
@@ -166,3 +1091,13 @@ jobs:
               echo "Filtered Git: ${FILTERED_REPOSITORY} (${FILTERED_PATHS})"
             fi
           } >> "$GITHUB_STEP_SUMMARY"
+
+  validate:
+    name: Validate embedded backup helpers
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - *backup-prepare
+      - *backup-validate
