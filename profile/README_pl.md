@@ -57,31 +57,24 @@
 <!--OPEN_PRS:START-->
 | Repozytorium | PR | Tytuł | Autor | Stan | Aktualizacja |
 | --- | ---: | --- | --- | --- | --- |
-| travnie/Autka | [#232](https://github.com/travnie/Autka/pull/232) | ci: bump the actions group with 2 updates | @dependabot[bot] | gotowy | 2026-10-05 |
-| travnie/Autka | [#233](https://github.com/travnie/Autka/pull/233) | deps(backend): bump the backend-minor-patch group in /backend with 5 updates | @dependabot[bot] | gotowy | 2026-10-05 |
-| travnie/Kanarek | [#147](https://github.com/travnie/Kanarek/pull/147) | chore(deps-dev): bump @cloudflare/workers-types from 5.20261001.1 to 5.20261004.1 in /worker | @dependabot[bot] | gotowy | 2026-10-07 |
-| travnie/Kanarek | [#148](https://github.com/travnie/Kanarek/pull/148) | chore(deps): bump gradle/actions/setup-gradle from 6.3.0 to 6.4.0 | @dependabot[bot] | gotowy | 2026-10-07 |
-| travnie/Kanarek | [#149](https://github.com/travnie/Kanarek/pull/149) | chore(deps-dev): bump vitest from 5.0.2 to 5.0.3 in /worker | @dependabot[bot] | gotowy | 2026-10-07 |
-| travnie/Kanarek | [#150](https://github.com/travnie/Kanarek/pull/150) | chore(deps-dev): bump wrangler from 4.145.0 to 4.147.0 in /worker | @dependabot[bot] | gotowy | 2026-10-07 |
-| travnie/twojstar | [#269](https://github.com/travnie/twojstar/pull/269) | Add Desktop Commander plugin | @trvny | gotowy | 2026-10-07 |
-| travnie/wambridge | [#221](https://github.com/travnie/wambridge/pull/221) | refactor: add staticmethod decorators to non-instance methods | @deepsource-autofix[bot] | gotowy | 2026-10-07 |
+| travnie/wambridge | [#222](https://github.com/travnie/wambridge/pull/222) | chore(deps-dev): bump ruff from 0.16.9 to 0.16.10 in the uv group | @dependabot[bot] | gotowy | 2026-10-10 |
 <!--OPEN_PRS:END-->
 
 ### 💬 Cytat z szuflady
 
 <!-- markdownlint-disable MD033 -->
 <!--STARTS_HERE_QUOTE_README-->
-<i>❝In Windows 98, minimized windows are actually moved far away outside the average monitor’s resolution.❞</i>
+<i>❝The business schools reward difficult complex behaviour more than simple behaviour, but simple behaviour is more effective. — Warren Buffett❞</i>
 <!--ENDS_HERE_QUOTE_README-->
 <!-- markdownlint-enable MD033 -->
 
 ### 📰 Ostatnio na antenie
 
 <!--README_FEED:START-->
-- [Can Nuclear Fuel be Delivered in Time to Power Advanced Nuclear Reactors?](https://carnegieendowment.org/research/2026/10/can-nuclear-fuel-be-delivered-in-time-to-power-advanced-nuclear-reactors)
-- [Policjantka z Chrzanowa najlepszym oskarżycielem publicznym - Przelom.pl - portal ziemi chrzanowskiej](https://news.google.com/atom/articles/CBMiqgFBVV95cUxNbGVjQnBfMzFfUmppWlZrWkpWUk9RbG1HM0wwdm9qak0wOVc0YUVCRm1tSF9mREYwNDVwZ1JKcU1NT1d6cUdwNkE0T18wLVVxWGJqbDRtSlRCSFgzeXJCeG9BNDM0R1JKSHNQRUhuV2E4T0x1VktwNHlrZkIwdFNKc0dkbnlaZUdkclZENGxWd080OW9CdTQyY2RqcS0zMF9kNUU1eDJ1NWdwQQ?oc=5)
-- [Christa Pike 'angry and confused' about Tennessee's failed execution effort, lawyers say](https://www.reuters.com/legal/government/christa-pikes-lawyers-demand-see-syringes-drug-residue-botched-execution-2026-10-07/)
-- [FBI arrests man for plotting mass shooting at Mall of America](https://www.reuters.com/legal/government/fbi-arrests-man-plotting-mass-shooting-mall-america-2026-10-07/)
-- [Venezuela's Maduro to face new US charges over alleged torture of Americans, official says](https://www.reuters.com/world/americas/maduro-wife-expected-face-new-charges-over-alleged-torture-americans-cnn-says-2026-10-07/)
-- [Spanish woman whose eviction ignited housing protests dies at 87](https://www.reuters.com/world/evicted-spanish-octogenarian-maricarmen-abascal-heart-spains-housing-protests-2026-10-07/)
+- [Nowa funkcja w Mapach Google. Pokaże same hity](https://antyweb.pl/nowa-funkcja-w-mapach-google-pokaze-same-hity)
+- [trvny merged PR #280 in travnie/twojstar](https://github.com/travnie/twojstar#feedseek-event-16860299441)
+- [Strong Panama quake damages buildings, disrupts power and air travel](https://www.reuters.com/business/environment/strong-80-magnitude-earthquake-felt-panama-usgs-2026-10-09/)
+- [sourcery-ai commented on PR #280 in travnie/twojstar · comment 6088795847](https://github.com/travnie/twojstar/pull/280?feedseek_event=16859384247#issuecomment-6088795847)
+- [trvny merged PR #278 in travnie/twojstar](https://github.com/travnie/twojstar#feedseek-event-16859176010)
+- [Vance says he does not know if Pentagon will proceed with livestream of Fort Hood gunman's execution](https://www.reuters.com/world/us/vance-says-he-does-not-know-if-pentagon-will-proceed-with-livestream-fort-hood-2026-10-09/)
 <!--README_FEED:END-->
