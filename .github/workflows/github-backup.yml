@@ -1000,6 +1000,15 @@ jobs:
           fi
           __GITHUB_BACKUP_HELPER_5__
 
+      - name: Validate embedded backup helpers
+        shell: bash
+        run: |
+          helper_dir="$RUNNER_TEMP/github-backup-helpers"
+          for script in github-backup-build.sh github-backup-verify-bucket.sh github-backup-retained.sh github-backup-storage-guard.sh github-backup-verify-catalog.sh; do
+            bash -n "$helper_dir/$script"
+          done
+          node --check "$helper_dir/github-backup-metadata.cjs"
+
       - name: Build repository archives
         shell: bash
         env:
