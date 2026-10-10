@@ -26,7 +26,7 @@
 | project | home | what lives there |
 | --- | --- | --- |
 | 🚗 **Autka** | [`travnie/Autka`](https://github.com/travnie/Autka) | Android/KMP car-listing aggregator and backend |
-| 🤖 **LlmBench** | [`travnie/llmbench`](https://github.com/travnie/llmbench) | Android workspace for account-backed and free-provider LLM access |
+| 🤖 **Aistee** | [`travnie/aistee`](https://github.com/travnie/aistee) | Android workspace for account-backed and free-provider LLM access |
 | 🐤 **Kanarek** | [`travnie/kanarek`](https://github.com/travnie/kanarek) | RSS/Atom reader, widgets, radio/IPTV and Worker backend |
 | 📡 **Feedseek** | [`trvny/feedseek`](https://github.com/trvny/feedseek) | feed discovery, repair and generation |
 | 📺 **TVPI** | [`trvny/tvpi`](https://github.com/trvny/tvpi) | IPTV tooling, web entry points and Worker bits |
