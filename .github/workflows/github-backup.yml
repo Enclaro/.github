@@ -5,6 +5,9 @@ on: # yamllint disable-line rule:truthy
   schedule:
     - cron: "37 3 * * 0"
   workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/github-backup.yml"
 
 concurrency:
   group: github-gcs-backup
@@ -27,6 +30,7 @@ env:
 
 jobs:
   backup:
+    if: github.event_name != 'pull_request'
     name: Back up GitHub repositories
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -85,7 +89,8 @@ jobs:
             echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           fi
 
-      - name: Prepare embedded backup helpers
+      - &backup-prepare
+        name: Prepare embedded backup helpers
         shell: bash
         run: |
           set -euo pipefail
@@ -1000,7 +1005,8 @@ jobs:
           fi
           __GITHUB_BACKUP_HELPER_5__
 
-      - name: Validate embedded backup helpers
+      - &backup-validate
+        name: Validate embedded backup helpers
         shell: bash
         run: |
           helper_dir="$RUNNER_TEMP/github-backup-helpers"
@@ -1085,3 +1091,13 @@ jobs:
               echo "Filtered Git: ${FILTERED_REPOSITORY} (${FILTERED_PATHS})"
             fi
           } >> "$GITHUB_STEP_SUMMARY"
+
+  validate:
+    name: Validate embedded backup helpers
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - *backup-prepare
+      - *backup-validate
